@@ -108,6 +108,9 @@ vil run \
 | `--labels` | Only process specific label IDs (e.g. `--labels highlight qa`) |
 | `--dry-run` | Print what would be done without executing |
 | `--force` | Ignore cached results and rerun everything |
+| `--export-clips` | Also save every segment as a standalone snippet in `reels/<label>/` |
+| `--fast-cuts` | Stream-copy cuts instead of re-encoding (faster, but clip starts snap to the previous keyframe) |
+| `--captions` | Burn a headline (segment `title`) on top and subtitles at the bottom of every clip. Needs `pip install -e .[captions]` |
 
 **Examples:**
 
@@ -157,7 +160,37 @@ Requires existing labels in the output directory.
 ```bash
 vil render --output ./output --context context.yaml
 vil render --output ./output --context context.yaml --labels highlight demo
+
+# Source videos stored elsewhere + one standalone file per snippet
+vil render --output ./output --context context.yaml \
+  --videos ~/Downloads/interview.mp4 --export-clips
 ```
+
+By default every clip is re-encoded so cuts land on the exact timestamp. Screen
+recordings (Zoom, Teams) often have a keyframe only every 30 seconds or more, so
+stream-copy cuts (`--fast-cuts`) can start far too early.
+
+Add `--captions` to burn a headline and subtitles into each clip. The video is
+scaled down and framed between a header band and a subtitle band, so captions
+never cover the picture; output size stays the same. The headline is the
+segment's `title` (falls back to `reason`). Subtitles come from the
+video's `transcript.json`; interviewers are shown in amber with their first
+name. Captions are drawn with Pillow and composited with ffmpeg's `overlay`
+filter, so they work even with ffmpeg builds that lack libass/drawtext. Set
+`CAPTION_FONT=/path/to/font.ttf` to use a different font.
+
+### `import-transcript` — Use an Existing Transcript
+
+Meeting tools export a `.vtt` or `.srt` transcript with speaker names. Import it
+to skip Whisper and keep the real names:
+
+```bash
+vil import-transcript --video interview.mp4 --transcript interview.vtt --output ./output
+vil run --videos interview.mp4 --context context.yaml --skip-transcription
+```
+
+`vil run` also picks up a sidecar transcript automatically when it sits next to
+the video with the same name (`interview.mp4` + `interview.vtt`).
 
 ### `init-context` — Generate Starter Context
 
@@ -349,7 +382,9 @@ output/
 
   reels/
     highlight.mp4                # Merged video of all "highlight" segments
-    highlight_manifest.json      # Clip list with sources and timestamps
+    highlight_manifest.json      # Clip list with sources, timestamps and reasons
+    highlight/                   # Standalone snippets (with --export-clips)
+      01_talk1_000312-000358.mp4
     demo.mp4
     demo_manifest.json
     qa.mp4
@@ -376,6 +411,7 @@ Labels marked `include_in_output: false` (e.g. `off_topic`) produce no reel or s
       "end": 312.1,
       "duration": 312.1,
       "reason": "Speaker introduces herself and outlines three topics.",
+      "title": "Speaker intro and agenda",
       "confidence": 0.97,
       "transcript_text": "Welcome everyone..."
     }

@@ -81,10 +81,16 @@ def _build_system_prompt(context: Context) -> str:
         "defined taxonomy.\n\n"
         "Rules:\n"
         "- Every second of the video must be covered by exactly one label.\n"
-        "- Prefer longer segments — do not split what is naturally continuous content.\n"
+        "- Segments with labels that go into the output are used as standalone video "
+        "clips. Keep them tight: only the key statement, usually 10–30 seconds and "
+        "rarely more than 45 seconds. Give the lead-in and surrounding chatter to a "
+        "label that is not included in the output.\n"
+        "- Do not split what is naturally continuous content within a label.\n"
         "- Return a JSON array ONLY. No preamble, no markdown fences, no explanation "
         "outside the JSON.\n"
         '- The "reason" field must be exactly one sentence.\n'
+        '- The "title" field is a headline for the clip, at most 6 words, '
+        'e.g. "Unsure which permission to pick".\n'
         '- The "confidence" field is a float from 0.0 to 1.0.\n'
         '- The "speaker" field must identify who is primarily speaking in the segment.\n'
         "- Use ONLY the label IDs provided. Any other value is invalid."
@@ -248,6 +254,7 @@ def _parse_response(raw: str, video_filename: str, settings: Settings) -> list[L
                 end=float(item.get("end", 0)),
                 duration=float(item.get("end", 0)) - float(item.get("start", 0)),
                 reason=item.get("reason", ""),
+                title=item.get("title", ""),
                 confidence=float(item.get("confidence", 0.5)),
                 transcript_text=item.get("transcript_text", ""),
                 speaker=item.get("speaker", ""),

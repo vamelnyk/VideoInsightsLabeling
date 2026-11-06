@@ -15,6 +15,7 @@ dependencies = [
 
 [project.optional-dependencies]
 diarization = ["pyannote.audio>=3.1"]
+captions = ["pillow>=10.1"]
 
 [project.scripts]
 vil = "src.main:cli"

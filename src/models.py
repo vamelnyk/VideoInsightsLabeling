@@ -23,6 +23,7 @@ class LabeledSegment(BaseModel):
     end: float  # seconds
     duration: float  # end - start
     reason: str  # Claude's one-sentence justification
+    title: str = ""  # short headline shown on top of the rendered clip
     confidence: float  # 0–1
     transcript_text: str
     speaker: str = ""  # primary speaker in this segment
@@ -49,6 +50,10 @@ class ReelClip(BaseModel):
     start: float
     end: float
     confidence: float = 0.0
+    reason: str = ""
+    title: str = ""
+    speaker: str = ""
+    clip_path: str = ""  # standalone snippet file, when clips are exported
 
 
 class ReelManifest(BaseModel):
