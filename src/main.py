@@ -166,6 +166,7 @@ def cli():
 @click.option("--force", is_flag=True, help="Ignore cached results, rerun everything")
 @click.option("--export-clips", is_flag=True, help="Also save each reel segment as a standalone snippet in reels/<label>/")
 @click.option("--fast-cuts", is_flag=True, help="Stream-copy cuts (fast, but starts snap to the previous keyframe)")
+@click.option("--captions", is_flag=True, help="Burn a headline and subtitles into every clip (needs Pillow)")
 def run(
     videos: tuple[str, ...],
     context_input: str,
@@ -181,6 +182,7 @@ def run(
     force: bool,
     export_clips: bool,
     fast_cuts: bool,
+    captions: bool,
 ) -> None:
     """Run the full pipeline: transcribe → label → summarize → render."""
     start_time = time.time()
@@ -409,6 +411,7 @@ def run(
                     label, segments_by_video, video_path_map, reel_path, tmp_dir,
                     accurate=not fast_cuts,
                     clips_dir=(out / "reels" / label.id) if export_clips else None,
+                    **_caption_kwargs(captions, ctx, out, video_path_map),
                 )
                 if manifest:
                     write_reel_manifest(manifest, get_reel_manifest_path(out, label.id))
@@ -533,6 +536,7 @@ def label(output_dir: str, context_input: str, preset: str | None, videos: tuple
 @click.option("--videos", "-v", multiple=True, type=click.Path(), help="Source videos or directories (default: look next to the output dir and in cwd)")
 @click.option("--export-clips", is_flag=True, help="Also save each segment as a standalone snippet in reels/<label>/")
 @click.option("--fast-cuts", is_flag=True, help="Stream-copy cuts (fast, but starts snap to the previous keyframe)")
+@click.option("--captions", is_flag=True, help="Burn a headline and subtitles into every clip (needs Pillow)")
 def render(
     output_dir: str,
     context_input: str,
@@ -541,6 +545,7 @@ def render(
     videos: tuple[str, ...],
     export_clips: bool,
     fast_cuts: bool,
+    captions: bool,
 ) -> None:
     """Render reels from existing labels (requires previous labeling)."""
     out = Path(output_dir)
@@ -578,6 +583,7 @@ def render(
 
     tmp_dir = get_tmp_dir(out)
     rendered = 0
+    caption_kwargs = _caption_kwargs(captions, ctx, out, video_path_map)
 
     for lbl in active_labels:
         if not lbl.include_in_output:
@@ -598,6 +604,7 @@ def render(
             lbl, segments_by_video, video_path_map, reel_path, tmp_dir,
             accurate=not fast_cuts,
             clips_dir=(out / "reels" / lbl.id) if export_clips else None,
+            **caption_kwargs,
         )
         if manifest:
             write_reel_manifest(manifest, get_reel_manifest_path(out, lbl.id))
@@ -675,6 +682,26 @@ def _find_source_video(stem: str, out: Path, videos: tuple[str, ...] = ()) -> Pa
             if candidate.exists():
                 return candidate
     return None
+
+
+def _caption_kwargs(captions: bool, ctx: Context, out: Path, video_path_map: dict[str, Path]) -> dict:
+    """Build render_reel caption arguments: transcripts and interviewer speakers."""
+    if not captions:
+        return {}
+    from src.pipeline.transcription import load_transcript
+
+    transcripts = {}
+    for name, path in video_path_map.items():
+        json_path = get_transcript_json_path(out, video_stem(path))
+        if json_path.exists():
+            segments = load_transcript(json_path)
+            for seg in segments:
+                seg.text = ctx.apply_corrections(seg.text)
+            transcripts[name] = segments
+        else:
+            log_warn(f"{name} — no transcript.json, clips get a headline but no subtitles")
+    secondary = {s.id for s in ctx.interviewers()} | {s.name for s in ctx.interviewers() if s.name}
+    return {"captions": True, "transcripts": transcripts, "secondary_speakers": secondary}
 
 
 def _find_sidecar_transcript(video: Path) -> Path | None:

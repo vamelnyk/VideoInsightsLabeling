@@ -46,6 +46,16 @@ class Context(BaseModel):
     notes: str = ""
     speakers: list[SpeakerDefinition] = []
     labels: list[LabelDefinition]
+    # Fix recurring transcription mistakes in captions, e.g. {"Commander": "Camunda"}.
+    # Keys match whole words/phrases, case-insensitively.
+    corrections: dict[str, str] = {}
+
+    def apply_corrections(self, text: str) -> str:
+        import re
+
+        for wrong in sorted(self.corrections, key=len, reverse=True):
+            text = re.sub(rf"(?<!\w){re.escape(wrong)}(?!\w)", self.corrections[wrong], text, flags=re.IGNORECASE)
+        return text
 
     @field_validator("labels")
     @classmethod

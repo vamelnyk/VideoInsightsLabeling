@@ -110,6 +110,7 @@ vil run \
 | `--force` | Ignore cached results and rerun everything |
 | `--export-clips` | Also save every segment as a standalone snippet in `reels/<label>/` |
 | `--fast-cuts` | Stream-copy cuts instead of re-encoding (faster, but clip starts snap to the previous keyframe) |
+| `--captions` | Burn a headline (segment `title`) on top and subtitles at the bottom of every clip. Needs `pip install -e .[captions]` |
 
 **Examples:**
 
@@ -168,6 +169,13 @@ vil render --output ./output --context context.yaml \
 By default every clip is re-encoded so cuts land on the exact timestamp. Screen
 recordings (Zoom, Teams) often have a keyframe only every 30 seconds or more, so
 stream-copy cuts (`--fast-cuts`) can start far too early.
+
+Add `--captions` to burn a headline and subtitles into each clip. The headline
+is the segment's `title` (falls back to `reason`). Subtitles come from the
+video's `transcript.json`; interviewers are shown in amber with their first
+name. Captions are drawn with Pillow and composited with ffmpeg's `overlay`
+filter, so they work even with ffmpeg builds that lack libass/drawtext. Set
+`CAPTION_FONT=/path/to/font.ttf` to use a different font.
 
 ### `import-transcript` — Use an Existing Transcript
 
@@ -401,6 +409,7 @@ Labels marked `include_in_output: false` (e.g. `off_topic`) produce no reel or s
       "end": 312.1,
       "duration": 312.1,
       "reason": "Speaker introduces herself and outlines three topics.",
+      "title": "Speaker intro and agenda",
       "confidence": 0.97,
       "transcript_text": "Welcome everyone..."
     }

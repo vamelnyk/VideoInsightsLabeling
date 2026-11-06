@@ -7,7 +7,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from src.context import LabelDefinition
-from src.models import LabeledSegment, ReelClip, ReelManifest
+from src.models import LabeledSegment, ReelClip, ReelManifest, TranscriptSegment
+from src.pipeline.captions import (
+    Overlay,
+    build_caption_lines,
+    captions_available,
+    overlay_ffmpeg_args,
+    render_overlays,
+)
 from src.utils.ffmpeg import run_ffmpeg, get_video_info, FFmpegError
 
 logger = logging.getLogger(__name__)
@@ -21,6 +28,9 @@ def render_reel(
     tmp_dir: Path,
     accurate: bool = True,
     clips_dir: Path | None = None,
+    captions: bool = False,
+    transcripts: dict[str, list[TranscriptSegment]] | None = None,
+    secondary_speakers: set[str] | None = None,
 ) -> ReelManifest | None:
     """Render a reel by trimming and concatenating all segments for a label.
 
@@ -35,6 +45,11 @@ def render_reel(
             previous keyframe, which can be tens of seconds early in screen
             recordings with sparse keyframes.
         clips_dir: If set, also keep every trimmed clip as a standalone file here.
+        captions: Burn a headline (segment title, or reason as fallback) on top
+            and subtitles from `transcripts` at the bottom. Implies accurate cuts.
+        transcripts: Dict mapping video filename → transcript, for subtitles.
+        secondary_speakers: Speakers drawn in a softer color with a name prefix
+            (e.g. interviewers).
 
     Returns:
         ReelManifest if successful, None if no segments.
@@ -57,13 +72,33 @@ def render_reel(
     trimmed_paths: list[Path] = []
     reel_clips: list[ReelClip] = []
 
+    if captions and not captions_available():
+        logger.warning("Captions need Pillow (pip install pillow) — rendering without captions")
+        captions = False
+    video_sizes: dict[Path, tuple[int, int]] = {}
+
     for i, (video_path, seg) in enumerate(clips):
         trimmed = tmp_dir / f"{label.id}_clip_{i:04d}.mp4"
         duration = seg.end - seg.start
 
+        overlays: list[Overlay] = []
+        if captions:
+            if video_path not in video_sizes:
+                info = get_video_info(video_path)
+                video_sizes[video_path] = (info["width"], info["height"])
+            width, height = video_sizes[video_path]
+            lines = build_caption_lines(
+                (transcripts or {}).get(video_path.name, []),
+                seg.start, seg.end, secondary_speakers,
+            )
+            overlays = render_overlays(
+                seg.title or seg.reason, label.name, label.color, lines,
+                width, height, tmp_dir, f"{label.id}_{i:04d}",
+            )
+
         try:
             run_ffmpeg(
-                _trim_args(video_path, seg.start, duration, trimmed, accurate),
+                _trim_args(video_path, seg.start, duration, trimmed, accurate or captions, overlays),
                 description=f"trim {video_path.name} [{seg.start:.1f}–{seg.end:.1f}]",
             )
             trimmed_paths.append(trimmed)
@@ -73,6 +108,7 @@ def render_reel(
                 end=seg.end,
                 confidence=seg.confidence,
                 reason=seg.reason,
+                title=seg.title,
                 speaker=seg.speaker,
             ))
         except FFmpegError as e:
@@ -124,15 +160,28 @@ def render_reel(
     return manifest
 
 
-def _trim_args(video_path: Path, start: float, duration: float, out: Path, accurate: bool) -> list[str]:
+def _trim_args(
+    video_path: Path,
+    start: float,
+    duration: float,
+    out: Path,
+    accurate: bool,
+    overlays: list[Overlay] | None = None,
+) -> list[str]:
     """Build ffmpeg args to cut [start, start+duration] from a video."""
-    args = ["-ss", f"{start:.3f}", "-i", str(video_path), "-t", f"{duration:.3f}"]
-    if accurate:
+    args = ["-ss", f"{start:.3f}", "-i", str(video_path)]
+    video_map = "0:v:0"
+    if overlays:
+        extra_inputs, graph, video_map = overlay_ffmpeg_args(overlays)
+        args += extra_inputs + ["-filter_complex", graph]
+    args += ["-t", f"{duration:.3f}"]
+    if accurate or overlays:
         args += [
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
             "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "160k",
-            "-map", "0:v:0", "-map", "0:a:0?",
+            "-map", video_map, "-map", "0:a:0?",
+            "-map_metadata", "-1", "-dn",
             "-movflags", "+faststart",
         ]
     else:
