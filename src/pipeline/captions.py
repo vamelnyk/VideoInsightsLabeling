@@ -157,59 +157,79 @@ def _hex_to_rgb(color: str) -> tuple[int, int, int]:
     return tuple(int(c[i:i + 2], 16) for i in (0, 2, 4))  # type: ignore[return-value]
 
 
-def _draw_headline(title: str, label_name: str, label_color: str, width: int, scale: float, path: Path) -> int:
-    """Draw the top banner. Returns its height."""
+BAND_COLOR = (16, 18, 24)
+HEADER_H_1080 = 120  # header band height at 1080p
+SUBTITLE_H_1080 = 130  # subtitle band height at 1080p (fits two lines)
+
+
+@dataclass
+class CaptionLayout:
+    """Overlays plus the base filter that makes room for them."""
+
+    overlays: list[Overlay]
+    base_filter: str  # applied to the video before the overlays
+
+
+def _even(n: float) -> int:
+    return int(n) // 2 * 2
+
+
+def _draw_headline(title: str, label_name: str, label_color: str, width: int, height: int, scale: float, path: Path) -> None:
+    """Draw the header band: label tag + one-line headline (font shrinks to fit)."""
     from PIL import Image, ImageDraw
 
-    pad_x, pad_y = int(48 * scale), int(22 * scale)
+    pad_x = int(48 * scale)
     accent_w = int(10 * scale)
     tag_font = _load_font(int(24 * scale), bold=True)
-    title_font = _load_font(int(50 * scale), bold=True)
+    max_w = width - 2 * pad_x - accent_w
 
     probe = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
-    title_lines = _wrap(probe, title, title_font, width - 2 * pad_x - accent_w)[:2]
-    tag_h = int(30 * scale)
-    line_h = int(60 * scale)
-    height = pad_y * 2 + tag_h + int(6 * scale) + line_h * len(title_lines)
+    size = int(52 * scale)
+    title_font = _load_font(size, bold=True)
+    while probe.textlength(title, font=title_font) > max_w and size > int(28 * scale):
+        size -= 2
+        title_font = _load_font(size, bold=True)
 
-    img = Image.new("RGBA", (width, height), (16, 18, 24, 242))
+    img = Image.new("RGBA", (width, height), BAND_COLOR + (255,))
     d = ImageDraw.Draw(img)
     accent = _hex_to_rgb(label_color)
     d.rectangle([0, 0, accent_w, height], fill=accent + (255,))
     x = pad_x + accent_w
-    d.text((x, pad_y), label_name.upper(), font=tag_font, fill=accent + (255,))
-    y = pad_y + tag_h + int(6 * scale)
-    for ln in title_lines:
-        d.text((x, y), ln, font=title_font, fill=(255, 255, 255, 255))
-        y += line_h
+    tag_h = int(30 * scale)
+    gap = int(8 * scale)
+    block_h = tag_h + gap + size
+    y = (height - block_h) // 2
+    d.text((x, y), label_name.upper(), font=tag_font, fill=accent + (255,))
+    d.text((x, y + tag_h + gap), title, font=title_font, fill=(255, 255, 255, 255))
     img.save(path)
-    return height
 
 
-def _draw_subtitle(line: CaptionLine, width: int, scale: float, path: Path) -> tuple[int, int]:
-    """Draw one subtitle box. Returns (box_width, box_height)."""
+def _draw_subtitle(line: CaptionLine, width: int, band_h: int, scale: float, path: Path) -> tuple[int, int]:
+    """Draw one subtitle (up to two lines). Returns (image_width, image_height)."""
     from PIL import Image, ImageDraw
 
     font = _load_font(int(42 * scale), bold=False)
     name_font = _load_font(int(42 * scale), bold=True)
-    pad_x, pad_y = int(26 * scale), int(14 * scale)
     line_h = int(54 * scale)
-    max_w = int(width * 0.78)
+    max_w = int(width * 0.9)
 
     prefix = f"{line.speaker.split()[0]}: " if line.secondary and line.speaker else ""
     probe = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
-    wrapped = _wrap(probe, prefix + line.text, font, max_w - 2 * pad_x)[:3]
-    text_w = max(probe.textlength(ln, font=font) for ln in wrapped)
-    box_w = int(text_w + 2 * pad_x)
-    box_h = pad_y * 2 + line_h * len(wrapped)
+    wrapped = _wrap(probe, prefix + line.text, font, max_w)
+    if len(wrapped) > 2:  # rare: squeeze into two lines with a smaller font
+        font = _load_font(int(34 * scale), bold=False)
+        name_font = _load_font(int(34 * scale), bold=True)
+        line_h = int(44 * scale)
+        wrapped = _wrap(probe, prefix + line.text, font, max_w)[:2]
+    img_w = int(max(probe.textlength(ln, font=font) for ln in wrapped)) + 4
+    img_h = min(band_h, line_h * len(wrapped) + int(8 * scale))
 
-    img = Image.new("RGBA", (box_w, box_h), (0, 0, 0, 0))
+    img = Image.new("RGBA", (img_w, img_h), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    d.rounded_rectangle([0, 0, box_w - 1, box_h - 1], radius=int(12 * scale), fill=(0, 0, 0, 240))
     color = (255, 214, 128, 255) if line.secondary else (255, 255, 255, 255)
-    y = pad_y
+    y = 0
     for i, ln in enumerate(wrapped):
-        x = pad_x
+        x = 0
         if i == 0 and prefix and ln.startswith(prefix.strip()):
             d.text((x, y), prefix, font=name_font, fill=color)
             x += int(probe.textlength(prefix, font=name_font))
@@ -217,7 +237,7 @@ def _draw_subtitle(line: CaptionLine, width: int, scale: float, path: Path) -> t
         d.text((x, y), ln, font=font, fill=color)
         y += line_h
     img.save(path)
-    return box_w, box_h
+    return img_w, img_h
 
 
 def render_overlays(
@@ -229,35 +249,45 @@ def render_overlays(
     height: int,
     out_dir: Path,
     prefix: str,
-) -> list[Overlay]:
-    """Draw headline + subtitle PNGs for one clip and return their placement."""
+) -> CaptionLayout:
+    """Draw headline + subtitle PNGs for one clip and lay them out.
+
+    The output keeps the source size: the video is scaled down and framed
+    between a header band (headline) and a footer band (subtitles), so
+    captions never cover the picture.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     scale = height / 1080
-    overlays: list[Overlay] = []
+    header_h = _even(HEADER_H_1080 * scale) if title else 0
+    footer_h = _even(SUBTITLE_H_1080 * scale) if lines else 0
+    video_h = _even(height - header_h - footer_h)
+    color = "0x%02x%02x%02x" % BAND_COLOR
+    base = f"scale=-2:{video_h},pad={width}:{height}:(ow-iw)/2:{header_h}:color={color},setsar=1"
 
+    overlays: list[Overlay] = []
     if title:
         p = out_dir / f"{prefix}_title.png"
-        _draw_headline(title, label_name, label_color, width, scale, p)
+        _draw_headline(title, label_name, label_color, width, header_h, scale, p)
         overlays.append(Overlay(p, 0, 0))
 
-    bottom_margin = int(60 * scale)
     for i, line in enumerate(lines):
         p = out_dir / f"{prefix}_sub_{i:03d}.png"
-        box_w, box_h = _draw_subtitle(line, width, scale, p)
-        overlays.append(Overlay(p, (width - box_w) // 2, height - bottom_margin - box_h, line.start, line.end))
+        w, h = _draw_subtitle(line, width, footer_h, scale, p)
+        y = header_h + video_h + (footer_h - h) // 2
+        overlays.append(Overlay(p, (width - w) // 2, y, line.start, line.end))
 
-    return overlays
+    return CaptionLayout(overlays, base)
 
 
-def overlay_ffmpeg_args(overlays: list[Overlay]) -> tuple[list[str], str, str]:
-    """Build extra -i inputs and a filter_complex for the overlays.
+def overlay_ffmpeg_args(layout: CaptionLayout) -> tuple[list[str], str, str]:
+    """Build extra -i inputs and a filter_complex for a caption layout.
 
     Input 0 is the video. Returns (input_args, filter_complex, output_label).
     """
     inputs: list[str] = []
-    filters: list[str] = []
-    current = "[0:v]"
-    for i, ov in enumerate(overlays, start=1):
+    filters: list[str] = [f"[0:v]{layout.base_filter}[base]"]
+    current = "[base]"
+    for i, ov in enumerate(layout.overlays, start=1):
         inputs += ["-i", str(ov.image)]
         out = f"[v{i}]"
         enable = ""

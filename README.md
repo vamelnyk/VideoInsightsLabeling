@@ -170,8 +170,10 @@ By default every clip is re-encoded so cuts land on the exact timestamp. Screen
 recordings (Zoom, Teams) often have a keyframe only every 30 seconds or more, so
 stream-copy cuts (`--fast-cuts`) can start far too early.
 
-Add `--captions` to burn a headline and subtitles into each clip. The headline
-is the segment's `title` (falls back to `reason`). Subtitles come from the
+Add `--captions` to burn a headline and subtitles into each clip. The video is
+scaled down and framed between a header band and a subtitle band, so captions
+never cover the picture; output size stays the same. The headline is the
+segment's `title` (falls back to `reason`). Subtitles come from the
 video's `transcript.json`; interviewers are shown in amber with their first
 name. Captions are drawn with Pillow and composited with ffmpeg's `overlay`
 filter, so they work even with ffmpeg builds that lack libass/drawtext. Set

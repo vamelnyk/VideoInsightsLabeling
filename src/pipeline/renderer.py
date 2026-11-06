@@ -9,7 +9,7 @@ from pathlib import Path
 from src.context import LabelDefinition
 from src.models import LabeledSegment, ReelClip, ReelManifest, TranscriptSegment
 from src.pipeline.captions import (
-    Overlay,
+    CaptionLayout,
     build_caption_lines,
     captions_available,
     overlay_ffmpeg_args,
@@ -81,7 +81,7 @@ def render_reel(
         trimmed = tmp_dir / f"{label.id}_clip_{i:04d}.mp4"
         duration = seg.end - seg.start
 
-        overlays: list[Overlay] = []
+        layout: CaptionLayout | None = None
         if captions:
             if video_path not in video_sizes:
                 info = get_video_info(video_path)
@@ -91,14 +91,14 @@ def render_reel(
                 (transcripts or {}).get(video_path.name, []),
                 seg.start, seg.end, secondary_speakers,
             )
-            overlays = render_overlays(
+            layout = render_overlays(
                 seg.title or seg.reason, label.name, label.color, lines,
                 width, height, tmp_dir, f"{label.id}_{i:04d}",
             )
 
         try:
             run_ffmpeg(
-                _trim_args(video_path, seg.start, duration, trimmed, accurate or captions, overlays),
+                _trim_args(video_path, seg.start, duration, trimmed, accurate or captions, layout),
                 description=f"trim {video_path.name} [{seg.start:.1f}–{seg.end:.1f}]",
             )
             trimmed_paths.append(trimmed)
@@ -166,16 +166,16 @@ def _trim_args(
     duration: float,
     out: Path,
     accurate: bool,
-    overlays: list[Overlay] | None = None,
+    layout: CaptionLayout | None = None,
 ) -> list[str]:
     """Build ffmpeg args to cut [start, start+duration] from a video."""
     args = ["-ss", f"{start:.3f}", "-i", str(video_path)]
     video_map = "0:v:0"
-    if overlays:
-        extra_inputs, graph, video_map = overlay_ffmpeg_args(overlays)
+    if layout:
+        extra_inputs, graph, video_map = overlay_ffmpeg_args(layout)
         args += extra_inputs + ["-filter_complex", graph]
     args += ["-t", f"{duration:.3f}"]
-    if accurate or overlays:
+    if accurate or layout:
         args += [
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
             "-pix_fmt", "yuv420p",
