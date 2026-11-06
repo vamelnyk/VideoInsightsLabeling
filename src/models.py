@@ -49,6 +49,9 @@ class ReelClip(BaseModel):
     start: float
     end: float
     confidence: float = 0.0
+    reason: str = ""
+    speaker: str = ""
+    clip_path: str = ""  # standalone snippet file, when clips are exported
 
 
 class ReelManifest(BaseModel):

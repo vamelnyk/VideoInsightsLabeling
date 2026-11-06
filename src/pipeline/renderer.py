@@ -2,7 +2,7 @@
 
 import json
 import logging
-import tempfile
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -19,6 +19,8 @@ def render_reel(
     video_paths: dict[str, Path],
     output_path: Path,
     tmp_dir: Path,
+    accurate: bool = True,
+    clips_dir: Path | None = None,
 ) -> ReelManifest | None:
     """Render a reel by trimming and concatenating all segments for a label.
 
@@ -28,6 +30,11 @@ def render_reel(
         video_paths: Dict mapping video filename → full path to video file.
         output_path: Where to write the output .mp4.
         tmp_dir: Directory for temporary trimmed clips.
+        accurate: Re-encode each clip so cuts land on the exact timestamp.
+            Stream copy (accurate=False) is faster but snaps the start to the
+            previous keyframe, which can be tens of seconds early in screen
+            recordings with sparse keyframes.
+        clips_dir: If set, also keep every trimmed clip as a standalone file here.
 
     Returns:
         ReelManifest if successful, None if no segments.
@@ -56,16 +63,7 @@ def render_reel(
 
         try:
             run_ffmpeg(
-                [
-                    "-ss", str(seg.start),
-                    "-i", str(video_path),
-                    "-t", str(duration),
-                    "-c", "copy",
-                    "-avoid_negative_ts", "make_zero",
-                    str(trimmed),
-                    "-y",
-                    "-loglevel", "error",
-                ],
+                _trim_args(video_path, seg.start, duration, trimmed, accurate),
                 description=f"trim {video_path.name} [{seg.start:.1f}–{seg.end:.1f}]",
             )
             trimmed_paths.append(trimmed)
@@ -74,6 +72,8 @@ def render_reel(
                 start=seg.start,
                 end=seg.end,
                 confidence=seg.confidence,
+                reason=seg.reason,
+                speaker=seg.speaker,
             ))
         except FFmpegError as e:
             logger.error(
@@ -84,6 +84,9 @@ def render_reel(
     if not trimmed_paths:
         logger.error("All clip trims failed for label \"%s\"", label.id)
         return None
+
+    if clips_dir is not None:
+        _export_clips(trimmed_paths, reel_clips, clips_dir)
 
     # Step 2: Check if we need to re-encode (different codecs/resolutions)
     needs_reencode = _check_needs_reencode(trimmed_paths)
@@ -119,6 +122,40 @@ def render_reel(
     )
 
     return manifest
+
+
+def _trim_args(video_path: Path, start: float, duration: float, out: Path, accurate: bool) -> list[str]:
+    """Build ffmpeg args to cut [start, start+duration] from a video."""
+    args = ["-ss", f"{start:.3f}", "-i", str(video_path), "-t", f"{duration:.3f}"]
+    if accurate:
+        args += [
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "160k",
+            "-map", "0:v:0", "-map", "0:a:0?",
+            "-movflags", "+faststart",
+        ]
+    else:
+        args += ["-c", "copy", "-avoid_negative_ts", "make_zero"]
+    return args + [str(out), "-y", "-loglevel", "error"]
+
+
+def _clip_filename(index: int, clip: ReelClip) -> str:
+    def ts(t: float) -> str:
+        t = int(t)
+        return f"{t // 3600:02d}{t % 3600 // 60:02d}{t % 60:02d}"
+    return f"{index:02d}_{Path(clip.source).stem}_{ts(clip.start)}-{ts(clip.end)}.mp4"
+
+
+def _export_clips(trimmed: list[Path], clips: list[ReelClip], clips_dir: Path) -> None:
+    """Copy each trimmed clip to clips_dir as a standalone snippet."""
+    clips_dir.mkdir(parents=True, exist_ok=True)
+    for old in clips_dir.glob("*.mp4"):
+        old.unlink()
+    for i, (path, clip) in enumerate(zip(trimmed, clips), start=1):
+        dest = clips_dir / _clip_filename(i, clip)
+        shutil.copy2(path, dest)
+        clip.clip_path = str(dest)
 
 
 def _check_needs_reencode(clip_paths: list[Path]) -> bool:

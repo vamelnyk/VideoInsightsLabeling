@@ -14,6 +14,7 @@ from rich.logging import RichHandler
 from src.config import Settings, load_settings
 from src.context import Context, load_context, resolve_context, generate_context_yaml, PRESETS
 from src.models import LabeledSegment, TranscriptSegment
+from src.pipeline.subtitles import SUBTITLE_EXTENSIONS
 from src.utils.ffmpeg import check_ffmpeg, get_video_duration
 from src.utils.files import (
     SUPPORTED_EXTENSIONS,
@@ -163,6 +164,8 @@ def cli():
 @click.option("--labels", multiple=True, help="Only process these label IDs")
 @click.option("--dry-run", is_flag=True, help="Print plan without executing")
 @click.option("--force", is_flag=True, help="Ignore cached results, rerun everything")
+@click.option("--export-clips", is_flag=True, help="Also save each reel segment as a standalone snippet in reels/<label>/")
+@click.option("--fast-cuts", is_flag=True, help="Stream-copy cuts (fast, but starts snap to the previous keyframe)")
 def run(
     videos: tuple[str, ...],
     context_input: str,
@@ -176,6 +179,8 @@ def run(
     labels: tuple[str, ...],
     dry_run: bool,
     force: bool,
+    export_clips: bool,
+    fast_cuts: bool,
 ) -> None:
     """Run the full pipeline: transcribe → label → summarize → render."""
     start_time = time.time()
@@ -236,9 +241,20 @@ def run(
             log_info("Starting transcription with speaker diarization...")
         else:
             log_info("Starting transcription...")
+        # Videos with a sidecar subtitle file (<stem>.vtt / <stem>.srt) skip Whisper
+        to_whisper: list[Path] = []
+        for vp in validated:
+            json_path = get_transcript_json_path(out, video_stem(vp))
+            sidecar = _find_sidecar_transcript(vp)
+            if sidecar and (force or not json_path.exists()):
+                log_info(f"{vp.name} — importing {sidecar.name} instead of running Whisper")
+                transcripts[vp.name] = _import_transcript(vp, sidecar, out)
+            else:
+                to_whisper.append(vp)
+
         from src.workers import run_transcription_pool
-        transcripts = run_transcription_pool(
-            validated, out, settings,
+        transcripts |= run_transcription_pool(
+            to_whisper, out, settings,
             language=ctx.language if ctx.language != "en" else None,
             skip_existing=not force,
             diarize=diarize,
@@ -391,6 +407,8 @@ def run(
             try:
                 manifest = render_reel(
                     label, segments_by_video, video_path_map, reel_path, tmp_dir,
+                    accurate=not fast_cuts,
+                    clips_dir=(out / "reels" / label.id) if export_clips else None,
                 )
                 if manifest:
                     write_reel_manifest(manifest, get_reel_manifest_path(out, label.id))
@@ -460,7 +478,8 @@ def transcribe(videos: tuple[str, ...], output_dir: str, model: str | None) -> N
 @click.option("--output", "-o", "output_dir", required=True, type=click.Path(exists=True))
 @click.option("--context", "-c", "context_input", required=True, help="Context: YAML file, markdown file, or inline text")
 @click.option("--preset", type=click.Choice(list(PRESETS.keys())), default=None, help="Label preset (required when context is text/markdown)")
-def label(output_dir: str, context_input: str, preset: str | None) -> None:
+@click.option("--videos", "-v", multiple=True, type=click.Path(), help="Source videos or directories (used for exact durations)")
+def label(output_dir: str, context_input: str, preset: str | None, videos: tuple[str, ...]) -> None:
     """Label existing transcripts (requires previous transcription)."""
     out = Path(output_dir)
     settings = load_settings()
@@ -488,23 +507,16 @@ def label(output_dir: str, context_input: str, preset: str | None) -> None:
 
         segments = load_transcript(json_path)
 
-        # Try to find the original video for duration
-        duration = 0.0
-        for ext in SUPPORTED_EXTENSIONS:
-            # Look in common locations
-            for candidate in [out.parent / f"{stem}{ext}", Path(f"{stem}{ext}")]:
-                if candidate.exists():
-                    duration = get_video_duration(candidate)
-                    break
-            if duration > 0:
-                break
+        source = _find_source_video(stem, out, videos)
+        duration = get_video_duration(source) if source else 0.0
+        video_name = source.name if source else f"{stem}.mp4"
 
         if duration == 0 and segments:
             duration = segments[-1].end + 1.0
 
         try:
-            labeled = label_transcript(segments, f"{stem}.mp4", duration, ctx, settings)
-            write_labels_json(labeled, f"{stem}.mp4", duration, labels_path)
+            labeled = label_transcript(segments, video_name, duration, ctx, settings)
+            write_labels_json(labeled, video_name, duration, labels_path)
             log_ok(f"{stem} — labeled ({len(labeled)} segments)")
             labeled_count += 1
         except Exception as e:
@@ -518,7 +530,18 @@ def label(output_dir: str, context_input: str, preset: str | None) -> None:
 @click.option("--context", "-c", "context_input", required=True, help="Context: YAML file, markdown file, or inline text")
 @click.option("--preset", type=click.Choice(list(PRESETS.keys())), default=None, help="Label preset (required when context is text/markdown)")
 @click.option("--labels", multiple=True, help="Only render these label IDs")
-def render(output_dir: str, context_input: str, preset: str | None, labels: tuple[str, ...]) -> None:
+@click.option("--videos", "-v", multiple=True, type=click.Path(), help="Source videos or directories (default: look next to the output dir and in cwd)")
+@click.option("--export-clips", is_flag=True, help="Also save each segment as a standalone snippet in reels/<label>/")
+@click.option("--fast-cuts", is_flag=True, help="Stream-copy cuts (fast, but starts snap to the previous keyframe)")
+def render(
+    output_dir: str,
+    context_input: str,
+    preset: str | None,
+    labels: tuple[str, ...],
+    videos: tuple[str, ...],
+    export_clips: bool,
+    fast_cuts: bool,
+) -> None:
     """Render reels from existing labels (requires previous labeling)."""
     out = Path(output_dir)
     settings = load_settings()
@@ -542,14 +565,12 @@ def render(output_dir: str, context_input: str, preset: str | None, labels: tupl
         if not labels_file.exists():
             continue
         stem = video_dir.name
-        segs = load_labels(labels_file)
-        # Find original video
-        for ext in SUPPORTED_EXTENSIONS:
-            for candidate in [out.parent / f"{stem}{ext}", Path(f"{stem}{ext}")]:
-                if candidate.exists():
-                    video_path_map[f"{stem}{ext}"] = candidate
-                    all_labels[f"{stem}{ext}"] = segs
-                    break
+        source = _find_source_video(stem, out, videos)
+        if source is None:
+            log_warn(f"{stem} — source video not found, skipping (pass it with --videos)")
+            continue
+        video_path_map[source.name] = source
+        all_labels[source.name] = load_labels(labels_file)
 
     active_labels = ctx.labels
     if labels:
@@ -573,7 +594,11 @@ def render(output_dir: str, context_input: str, preset: str | None, labels: tupl
             continue
 
         reel_path = get_reel_path(out, lbl.id)
-        manifest = render_reel(lbl, segments_by_video, video_path_map, reel_path, tmp_dir)
+        manifest = render_reel(
+            lbl, segments_by_video, video_path_map, reel_path, tmp_dir,
+            accurate=not fast_cuts,
+            clips_dir=(out / "reels" / lbl.id) if export_clips else None,
+        )
         if manifest:
             write_reel_manifest(manifest, get_reel_manifest_path(out, lbl.id))
             log_ok(f"reels/{lbl.id}.mp4 rendered")
@@ -581,6 +606,33 @@ def render(output_dir: str, context_input: str, preset: str | None, labels: tupl
 
     cleanup_tmp(out)
     log_ok(f"Rendered {rendered} reel(s)")
+
+
+@cli.command("import-transcript")
+@click.option("--video", "-v", "video", required=True, type=click.Path(exists=True, dir_okay=False), help="Source video file")
+@click.option("--transcript", "-t", "transcript", required=True, type=click.Path(exists=True, dir_okay=False), help="Subtitle transcript (.vtt or .srt)")
+@click.option("--output", "-o", "output_dir", default="./output", type=click.Path())
+def import_transcript(video: str, transcript: str, output_dir: str) -> None:
+    """Import a meeting transcript (.vtt/.srt) instead of running Whisper.
+
+    Speaker names in the file (e.g. "Jane Doe: ...") are kept. Afterwards, run
+    `vil run ... --skip-transcription` or `vil label`.
+    """
+    out = Path(output_dir)
+    settings = load_settings()
+    setup_logging(settings.log_level, out)
+
+    tp = Path(transcript)
+    if tp.suffix.lower() not in SUBTITLE_EXTENSIONS:
+        log_error(f"Unsupported transcript format \"{tp.suffix}\" (supported: .vtt, .srt)")
+        sys.exit(1)
+
+    try:
+        segments, _ = _import_transcript(Path(video), tp, out)
+    except ValueError as e:
+        log_error(str(e))
+        sys.exit(1)
+    log_ok(f"{Path(video).name} — imported {len(segments)} segments from {tp.name}")
 
 
 @cli.command("init-context")
@@ -607,6 +659,52 @@ def init_context(output: str, preset: str | None) -> None:
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+
+def _find_source_video(stem: str, out: Path, videos: tuple[str, ...] = ()) -> Path | None:
+    """Locate the source video for an output folder stem.
+
+    Looks in the explicit --videos inputs first, then next to the output dir
+    and in the current directory.
+    """
+    for vp in resolve_video_inputs(videos):
+        if video_stem(vp) == stem and vp.exists():
+            return vp
+    for ext in sorted(SUPPORTED_EXTENSIONS):
+        for candidate in (out.parent / f"{stem}{ext}", Path(f"{stem}{ext}")):
+            if candidate.exists():
+                return candidate
+    return None
+
+
+def _find_sidecar_transcript(video: Path) -> Path | None:
+    """Return <stem>.vtt or <stem>.srt next to the video, if present."""
+    for ext in sorted(SUBTITLE_EXTENSIONS):
+        candidate = video.with_suffix(ext)
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _import_transcript(video: Path, transcript: Path, out: Path) -> tuple[list[TranscriptSegment], float]:
+    """Parse a subtitle file and write transcript.json/.txt for the video."""
+    from src.pipeline.subtitles import parse_subtitles
+    from src.pipeline.transcription import write_transcript_json, write_transcript_txt
+    from src.utils.files import get_transcript_txt_path
+
+    segments = parse_subtitles(transcript)
+    duration = get_video_duration(video)
+    if segments[-1].end > duration + 5:
+        log_warn(
+            f"{transcript.name} ends at {segments[-1].end:.0f}s but {video.name} is "
+            f"{duration:.0f}s long — is it the right transcript?"
+        )
+    stem = video_stem(video)
+    ensure_video_dir(out, stem)
+    write_transcript_json(segments, get_transcript_json_path(out, stem))
+    write_transcript_txt(segments, get_transcript_txt_path(out, stem), video.name, duration)
+    return segments, duration
+
 
 
 def _print_dry_run(

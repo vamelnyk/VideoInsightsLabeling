@@ -108,6 +108,8 @@ vil run \
 | `--labels` | Only process specific label IDs (e.g. `--labels highlight qa`) |
 | `--dry-run` | Print what would be done without executing |
 | `--force` | Ignore cached results and rerun everything |
+| `--export-clips` | Also save every segment as a standalone snippet in `reels/<label>/` |
+| `--fast-cuts` | Stream-copy cuts instead of re-encoding (faster, but clip starts snap to the previous keyframe) |
 
 **Examples:**
 
@@ -157,7 +159,28 @@ Requires existing labels in the output directory.
 ```bash
 vil render --output ./output --context context.yaml
 vil render --output ./output --context context.yaml --labels highlight demo
+
+# Source videos stored elsewhere + one standalone file per snippet
+vil render --output ./output --context context.yaml \
+  --videos ~/Downloads/interview.mp4 --export-clips
 ```
+
+By default every clip is re-encoded so cuts land on the exact timestamp. Screen
+recordings (Zoom, Teams) often have a keyframe only every 30 seconds or more, so
+stream-copy cuts (`--fast-cuts`) can start far too early.
+
+### `import-transcript` — Use an Existing Transcript
+
+Meeting tools export a `.vtt` or `.srt` transcript with speaker names. Import it
+to skip Whisper and keep the real names:
+
+```bash
+vil import-transcript --video interview.mp4 --transcript interview.vtt --output ./output
+vil run --videos interview.mp4 --context context.yaml --skip-transcription
+```
+
+`vil run` also picks up a sidecar transcript automatically when it sits next to
+the video with the same name (`interview.mp4` + `interview.vtt`).
 
 ### `init-context` — Generate Starter Context
 
@@ -349,7 +372,9 @@ output/
 
   reels/
     highlight.mp4                # Merged video of all "highlight" segments
-    highlight_manifest.json      # Clip list with sources and timestamps
+    highlight_manifest.json      # Clip list with sources, timestamps and reasons
+    highlight/                   # Standalone snippets (with --export-clips)
+      01_talk1_000312-000358.mp4
     demo.mp4
     demo_manifest.json
     qa.mp4
